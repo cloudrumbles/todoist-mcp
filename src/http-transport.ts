@@ -160,7 +160,7 @@ export class HttpServerTransport {
     }
 
     private isValidJSONRPCRequest(request: unknown): request is JSONRPCRequest {
-        return (
+        return !!(
             request &&
             typeof request === 'object' &&
             (request as { jsonrpc?: string }).jsonrpc === '2.0' &&
