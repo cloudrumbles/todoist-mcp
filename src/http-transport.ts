@@ -43,12 +43,39 @@ export class HttpServerTransport {
         this.app.use(
             cors({
                 origin: '*',
-                methods: ['GET', 'POST', 'OPTIONS'],
-                allowedHeaders: ['Content-Type', 'Authorization'],
+                methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+                allowedHeaders: [
+                    'Content-Type',
+                    'Authorization',
+                    'MCP-Session-ID',
+                    'Last-Event-ID',
+                ],
+                exposedHeaders: ['MCP-Session-ID'],
             }),
         )
         this.app.use(express.json({ limit: '10mb' }))
         this.app.use(express.urlencoded({ extended: true }))
+
+        // Add content-type validation for JSON-RPC requests
+        this.app.use((req, res, next) => {
+            if (
+                (req.method === 'POST' && req.path === '/') ||
+                req.path === '/rpc' ||
+                req.path === '/message'
+            ) {
+                if (!req.is('application/json')) {
+                    return res.status(415).json({
+                        jsonrpc: '2.0',
+                        id: null,
+                        error: {
+                            code: -32700,
+                            message: 'Parse error - Content-Type must be application/json',
+                        },
+                    })
+                }
+            }
+            next()
+        })
     }
 
     private setupRoutes() {
@@ -61,27 +88,43 @@ export class HttpServerTransport {
             })
         })
 
-        // Root endpoint with server info
+        // Root endpoint with server info and MCP capabilities
         this.app.get('/', (req: Request, res: Response) => {
+            res.setHeader('Content-Type', 'application/json')
             res.json({
                 name: 'Todoist MCP Server',
                 version: '1.0.2',
                 description: 'HTTP-based Model Context Protocol server for Todoist',
+                protocol: {
+                    version: '2024-11-05',
+                    capabilities: {
+                        tools: {},
+                        logging: {},
+                    },
+                },
                 endpoints: {
                     health: '/health',
-                    rpc: '/rpc',
-                    tools: '/tools',
+                    mcp: '/ (POST for JSON-RPC)',
+                    rpc: '/rpc (alias for JSON-RPC)',
+                    tools: '/tools (GET for tool list)',
+                    sse: '/sse (Server-Sent Events)',
+                    message: '/message (POST for MCP messages)',
                 },
                 usage: {
                     listTools: 'GET /tools',
                     callTool:
-                        'POST /rpc with {"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"toolName","arguments":{}}}',
+                        'POST / with {"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"toolName","arguments":{}}}',
+                    initialize:
+                        'POST / with {"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"YourClient","version":"1.0.0"}}}',
                 },
+                transport: 'HTTP with JSON-RPC 2.0 and optional SSE streaming',
             })
         })
 
         // MCP JSON-RPC endpoint - handle POST requests to root path
         this.app.post('/', async (req: Request, res: Response) => {
+            res.setHeader('Content-Type', 'application/json')
+
             try {
                 const request: JSONRPCRequest = req.body
 
@@ -91,7 +134,7 @@ export class HttpServerTransport {
                         id: (req.body as JSONRPCRequest)?.id || null,
                         error: {
                             code: -32600,
-                            message: 'Invalid Request',
+                            message: 'Invalid Request - must be valid JSON-RPC 2.0',
                         },
                     })
                 }
@@ -106,13 +149,16 @@ export class HttpServerTransport {
                     error: {
                         code: -32603,
                         message: 'Internal error',
+                        data: error instanceof Error ? error.message : 'Unknown error',
                     },
                 })
             }
         })
 
-        // List available tools
+        // List available tools - MCP compliant endpoint
         this.app.get('/tools', async (req: Request, res: Response) => {
+            res.setHeader('Content-Type', 'application/json')
+
             try {
                 console.log('Tools request - server object keys:', Object.keys(this.server))
                 console.log(
@@ -138,14 +184,21 @@ export class HttpServerTransport {
             } catch (error) {
                 console.error('Error listing tools:', error)
                 res.status(500).json({
-                    error: 'Failed to list tools',
-                    details: error instanceof Error ? error.message : 'Unknown error',
+                    jsonrpc: '2.0',
+                    id: 'tools-list',
+                    error: {
+                        code: -32603,
+                        message: 'Failed to list tools',
+                        data: error instanceof Error ? error.message : 'Unknown error',
+                    },
                 })
             }
         })
 
-        // Main RPC endpoint
+        // Main RPC endpoint (alias for root POST)
         this.app.post('/rpc', async (req: Request, res: Response) => {
+            res.setHeader('Content-Type', 'application/json')
+
             try {
                 const request: JSONRPCRequest = req.body
 
@@ -155,7 +208,7 @@ export class HttpServerTransport {
                         id: (req.body as { id?: string | number })?.id || null,
                         error: {
                             code: -32600,
-                            message: 'Invalid Request',
+                            message: 'Invalid Request - must be valid JSON-RPC 2.0',
                         },
                     })
                 }
@@ -176,8 +229,10 @@ export class HttpServerTransport {
             }
         })
 
-        // Handle tool execution directly
+        // Handle tool execution directly (convenience endpoint)
         this.app.post('/tools/:toolName', async (req: Request, res: Response) => {
+            res.setHeader('Content-Type', 'application/json')
+
             try {
                 const { toolName } = req.params
                 const args = req.body
@@ -196,8 +251,13 @@ export class HttpServerTransport {
             } catch (error) {
                 console.error('Tool execution error:', error)
                 res.status(500).json({
-                    error: 'Tool execution failed',
-                    details: error instanceof Error ? error.message : 'Unknown error',
+                    jsonrpc: '2.0',
+                    id: `tool-${Date.now()}`,
+                    error: {
+                        code: -32603,
+                        message: 'Tool execution failed',
+                        data: error instanceof Error ? error.message : 'Unknown error',
+                    },
                 })
             }
         })
@@ -267,23 +327,24 @@ export class HttpServerTransport {
             })
         })
 
-        // MCP Server-Sent Events endpoint
+        // MCP Server-Sent Events endpoint for streaming responses
         this.app.get('/sse', (req: Request, res: Response) => {
-            // Set SSE headers
+            // Set SSE headers per MCP specification
             res.writeHead(200, {
                 'Content-Type': 'text/event-stream',
                 'Cache-Control': 'no-cache',
                 Connection: 'keep-alive',
                 'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Headers': 'Cache-Control, Authorization',
+                'Access-Control-Allow-Headers': 'Cache-Control, Authorization, MCP-Session-ID',
+                'MCP-Session-ID': `mcp-session-${Date.now()}`,
             })
 
-            // Send MCP protocol messages
+            // Send MCP protocol initialization message
             const sendMessage = (message: MCPMessage) => {
                 res.write(`data: ${JSON.stringify(message)}\n\n`)
             }
 
-            // Handle MCP initialization
+            // Send MCP initialization response
             sendMessage({
                 jsonrpc: '2.0',
                 id: 'server-init',
@@ -300,10 +361,12 @@ export class HttpServerTransport {
                 },
             })
 
-            // Keep connection alive with ping
+            // Send periodic heartbeat to keep connection alive
             const keepAlive = setInterval(() => {
                 res.write('event: ping\n')
-                res.write('data: {}\n\n')
+                res.write(
+                    `data: {"type":"heartbeat","timestamp":"${new Date().toISOString()}"}\n\n`,
+                )
             }, 30000)
 
             // Handle client disconnect
@@ -311,10 +374,18 @@ export class HttpServerTransport {
                 clearInterval(keepAlive)
                 res.end()
             })
+
+            req.on('error', (error) => {
+                console.error('SSE connection error:', error)
+                clearInterval(keepAlive)
+                res.end()
+            })
         })
 
-        // MCP message endpoint for client to send messages
+        // MCP message endpoint for client to send JSON-RPC messages
         this.app.post('/message', async (req: Request, res: Response) => {
+            res.setHeader('Content-Type', 'application/json')
+
             try {
                 const request: JSONRPCRequest = req.body
 
@@ -324,7 +395,7 @@ export class HttpServerTransport {
                         id: (req.body as JSONRPCRequest)?.id || null,
                         error: {
                             code: -32600,
-                            message: 'Invalid Request',
+                            message: 'Invalid Request - must be valid JSON-RPC 2.0',
                         },
                     })
                 }
@@ -347,15 +418,33 @@ export class HttpServerTransport {
     }
 
     private isValidJSONRPCRequest(request: unknown): request is JSONRPCRequest {
-        return !!(
-            request &&
-            typeof request === 'object' &&
-            (request as { jsonrpc?: string }).jsonrpc === '2.0' &&
-            typeof (request as { method?: unknown }).method === 'string' &&
-            ((request as { id?: unknown }).id === null ||
-                typeof (request as { id?: unknown }).id === 'string' ||
-                typeof (request as { id?: unknown }).id === 'number')
-        )
+        if (!request || typeof request !== 'object') {
+            return false
+        }
+
+        const req = request as {
+            jsonrpc?: string
+            method?: unknown
+            id?: unknown
+            params?: unknown
+        }
+
+        // Must have jsonrpc: "2.0"
+        if (req.jsonrpc !== '2.0') {
+            return false
+        }
+
+        // Must have a method for requests
+        if (typeof req.method !== 'string' || req.method.length === 0) {
+            return false
+        }
+
+        // ID must be string, number, or null
+        if (req.id !== null && typeof req.id !== 'string' && typeof req.id !== 'number') {
+            return false
+        }
+
+        return true
     }
 
     private async handleMCPRequest(
@@ -534,7 +623,27 @@ export class HttpServerTransport {
                     }
                 }
 
-                case 'initialize':
+                case 'initialize': {
+                    const params = request.params as {
+                        protocolVersion: string
+                        capabilities: Record<string, unknown>
+                        clientInfo: { name: string; version: string }
+                    }
+
+                    // Validate protocol version
+                    if (params.protocolVersion !== '2024-11-05') {
+                        return {
+                            jsonrpc: '2.0',
+                            id: request.id,
+                            error: {
+                                code: -32602,
+                                message: `Unsupported protocol version: ${params.protocolVersion}. Expected: 2024-11-05`,
+                            },
+                        } as JSONRPCErrorResponse
+                    }
+
+                    console.log('MCP Client initialized:', params.clientInfo)
+
                     return {
                         jsonrpc: '2.0',
                         id: request.id,
@@ -542,12 +651,30 @@ export class HttpServerTransport {
                             protocolVersion: '2024-11-05',
                             capabilities: {
                                 tools: {},
+                                logging: {},
                             },
                             serverInfo: {
                                 name: 'Todoist MCP Server',
                                 version: '1.0.2',
                             },
                         },
+                    }
+                }
+
+                case 'ping':
+                    return {
+                        jsonrpc: '2.0',
+                        id: request.id,
+                        result: {},
+                    }
+
+                case 'notifications/initialized':
+                    // Client has finished initialization
+                    console.log('MCP Client initialization complete')
+                    return {
+                        jsonrpc: '2.0',
+                        id: request.id,
+                        result: {},
                     }
 
                 default:
