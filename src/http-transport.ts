@@ -13,6 +13,19 @@ interface JSONRPCErrorResponse {
     }
 }
 
+interface MCPMessage {
+    jsonrpc: '2.0'
+    id?: string | number
+    method?: string
+    params?: unknown
+    result?: unknown
+    error?: {
+        code: number
+        message: string
+        data?: unknown
+    }
+}
+
 export class HttpServerTransport {
     private app: express.Application
     private server: McpServer
@@ -154,6 +167,149 @@ export class HttpServerTransport {
                 res.status(500).json({
                     error: 'Tool execution failed',
                     details: error instanceof Error ? error.message : 'Unknown error',
+                })
+            }
+        })
+
+        // OAuth authorization server discovery endpoint for MCP
+        this.app.get('/.well-known/oauth-authorization-server', (req: Request, res: Response) => {
+            res.json({
+                issuer: `${req.protocol}://${req.get('host')}`,
+                authorization_endpoint: `${req.protocol}://${req.get('host')}/oauth/authorize`,
+                token_endpoint: `${req.protocol}://${req.get('host')}/oauth/token`,
+                response_types_supported: ['code'],
+                grant_types_supported: ['authorization_code'],
+                code_challenge_methods_supported: ['S256'],
+                scopes_supported: ['mcp:read', 'mcp:write'],
+            })
+        })
+
+        // OAuth authorization endpoint
+        this.app.get('/oauth/authorize', (req: Request, res: Response) => {
+            // For now, auto-approve all requests
+            const { client_id, redirect_uri, code_challenge, state } = req.query
+            const authCode = `mcp_auth_${Date.now()}`
+
+            const redirectUrl = new URL(redirect_uri as string)
+            redirectUrl.searchParams.set('code', authCode)
+            if (state) redirectUrl.searchParams.set('state', state as string)
+
+            res.redirect(redirectUrl.toString())
+        })
+
+        // OAuth token endpoint
+        this.app.post('/oauth/token', (req: Request, res: Response) => {
+            const { grant_type, code } = req.body
+
+            if (grant_type === 'authorization_code' && code?.startsWith('mcp_auth_')) {
+                res.json({
+                    access_token: `mcp_token_${Date.now()}`,
+                    token_type: 'Bearer',
+                    expires_in: 3600,
+                    scope: 'mcp:read mcp:write',
+                })
+            } else {
+                res.status(400).json({
+                    error: 'invalid_grant',
+                    error_description: 'Invalid authorization code',
+                })
+            }
+        })
+
+        // MCP Client registration endpoint
+        this.app.post('/register', (req: Request, res: Response) => {
+            const { client_id, redirect_uris, client_name } = req.body
+
+            // For simplicity, auto-approve all client registrations
+            res.json({
+                client_id: client_id || `mcp_client_${Date.now()}`,
+                client_secret: `mcp_secret_${Date.now()}`,
+                registration_access_token: `mcp_reg_token_${Date.now()}`,
+                registration_client_uri: `${req.protocol}://${req.get('host')}/register/${client_id}`,
+                client_id_issued_at: Math.floor(Date.now() / 1000),
+                client_secret_expires_at: 0, // Never expires
+                redirect_uris: redirect_uris || [`${req.protocol}://${req.get('host')}/callback`],
+                grant_types: ['authorization_code'],
+                response_types: ['code'],
+                client_name: client_name || 'MCP Client',
+                token_endpoint_auth_method: 'client_secret_post',
+            })
+        })
+
+        // MCP Server-Sent Events endpoint
+        this.app.get('/sse', (req: Request, res: Response) => {
+            // Set SSE headers
+            res.writeHead(200, {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                Connection: 'keep-alive',
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Cache-Control, Authorization',
+            })
+
+            // Send MCP protocol messages
+            const sendMessage = (message: MCPMessage) => {
+                res.write(`data: ${JSON.stringify(message)}\n\n`)
+            }
+
+            // Handle MCP initialization
+            sendMessage({
+                jsonrpc: '2.0',
+                id: 'server-init',
+                result: {
+                    protocolVersion: '2024-11-05',
+                    capabilities: {
+                        tools: {},
+                        logging: {},
+                    },
+                    serverInfo: {
+                        name: 'Todoist MCP Server',
+                        version: '1.0.2',
+                    },
+                },
+            })
+
+            // Keep connection alive with ping
+            const keepAlive = setInterval(() => {
+                res.write('event: ping\n')
+                res.write('data: {}\n\n')
+            }, 30000)
+
+            // Handle client disconnect
+            req.on('close', () => {
+                clearInterval(keepAlive)
+                res.end()
+            })
+        })
+
+        // MCP message endpoint for client to send messages
+        this.app.post('/message', async (req: Request, res: Response) => {
+            try {
+                const request: JSONRPCRequest = req.body
+
+                if (!this.isValidJSONRPCRequest(request)) {
+                    return res.status(400).json({
+                        jsonrpc: '2.0',
+                        id: (req.body as JSONRPCRequest)?.id || null,
+                        error: {
+                            code: -32600,
+                            message: 'Invalid Request',
+                        },
+                    })
+                }
+
+                const response = await this.handleMCPRequest(request)
+                res.json(response)
+            } catch (error) {
+                console.error('MCP Message Error:', error)
+                res.status(500).json({
+                    jsonrpc: '2.0',
+                    id: req.body?.id || null,
+                    error: {
+                        code: -32603,
+                        message: 'Internal error',
+                        data: error instanceof Error ? error.message : 'Unknown error',
+                    },
                 })
             }
         })
