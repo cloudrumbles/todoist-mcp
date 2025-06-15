@@ -83,3 +83,68 @@ npx -y @smithery/cli install @miottid/todoist-mcp --client claude
 <a href="https://glama.ai/mcp/servers/2010u29g1w">
   <img width="380" height="200" src="https://glama.ai/mcp/servers/2010u29g1w/badge" alt="Todoist MCP server" />
 </a>
+
+## HTTP Deployment
+
+This MCP server can also be deployed as an HTTP service for cloud hosting platforms like Railway, Heroku, or Vercel.
+
+### Railway Deployment
+
+1. **Deploy to Railway:**
+   - Fork this repository
+   - Connect your GitHub repository to Railway
+   - Set the `TODOIST_API_KEY` environment variable in Railway dashboard
+   - Deploy using the included Dockerfile
+
+2. **Using the HTTP API:**
+
+   Once deployed, you can interact with the server via HTTP:
+
+   ```bash
+   # Health check
+   GET https://your-app.railway.app/health
+
+   # List available tools
+   GET https://your-app.railway.app/tools
+
+   # Call a tool via JSON-RPC
+   POST https://your-app.railway.app/rpc
+   Content-Type: application/json
+   
+   {
+     "jsonrpc": "2.0",
+     "id": "1",
+     "method": "tools/call",
+     "params": {
+       "name": "add_task",
+       "arguments": {
+         "content": "Review quarterly reports",
+         "due_string": "tomorrow"
+       }
+     }
+   }
+
+   # Direct tool execution
+   POST https://your-app.railway.app/tools/add_task
+   Content-Type: application/json
+   
+   {
+     "content": "Review quarterly reports",
+     "due_string": "tomorrow"
+   }
+   ```
+
+3. **Local Development:**
+   ```bash
+   npm install
+   npm run build
+   TODOIST_API_KEY=your_key npm start
+   ```
+
+   The server will run on `http://localhost:3000` or the port specified in `PORT` environment variable.
+
+### Environment Variables
+
+- `TODOIST_API_KEY` (required): Your Todoist API key
+- `PORT` (optional): HTTP server port (defaults to 3000)
+- `NODE_ENV` (optional): Set to "production" for production deployment

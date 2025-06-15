@@ -1,6 +1,7 @@
+import 'dotenv/config'
 import { TodoistApi } from '@doist/todoist-api-typescript'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { HttpServerTransport } from './http-transport.js'
 import { registerAddComment } from './tools/add-comment.js'
 import { registerAddLabel } from './tools/add-label.js'
 import { registerAddProject } from './tools/add-project.js'
@@ -104,9 +105,21 @@ registerRemoveSharedLabel(server, api)
 registerRenameSharedLabel(server, api)
 
 async function main() {
-    const transport = new StdioServerTransport()
-    await server.connect(transport)
-    console.error('Todoist Agent Server running on stdio')
+    const port = process.env.PORT ? Number.parseInt(process.env.PORT) : 3000
+    const transport = new HttpServerTransport(server, port)
+
+    // Connect the server with a minimal transport
+    await server.connect({
+        send: async () => {},
+        close: async () => {},
+        start: async () => {},
+        onmessage: undefined,
+        onclose: undefined,
+        onerror: undefined,
+    })
+
+    // Start the HTTP server
+    await transport.start()
 }
 
 main().catch((error) => {
