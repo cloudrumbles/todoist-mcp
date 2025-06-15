@@ -80,6 +80,37 @@ export class HttpServerTransport {
             })
         })
 
+        // MCP JSON-RPC endpoint - handle POST requests to root path
+        this.app.post('/', async (req: Request, res: Response) => {
+            try {
+                const request: JSONRPCRequest = req.body
+
+                if (!this.isValidJSONRPCRequest(request)) {
+                    return res.status(400).json({
+                        jsonrpc: '2.0',
+                        id: (req.body as JSONRPCRequest)?.id || null,
+                        error: {
+                            code: -32600,
+                            message: 'Invalid Request',
+                        },
+                    })
+                }
+
+                const response = await this.handleMCPRequest(request)
+                res.json(response)
+            } catch (error) {
+                console.error('Error handling MCP request:', error)
+                res.status(500).json({
+                    jsonrpc: '2.0',
+                    id: null,
+                    error: {
+                        code: -32603,
+                        message: 'Internal error',
+                    },
+                })
+            }
+        })
+
         // List available tools
         this.app.get('/tools', async (req: Request, res: Response) => {
             try {
